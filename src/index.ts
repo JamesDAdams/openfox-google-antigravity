@@ -14,7 +14,7 @@ const antigravityPreset: ProviderPreset = {
   defaults: {
     name: 'Google Antigravity',
     url: 'https://cloudcode-pa.googleapis.com',
-    backend: 'unknown',
+    backend: 'openai',
   },
   connectLabel: 'Connect Google',
   disconnectLabel: 'Disconnect',
