@@ -4,6 +4,8 @@ Use your **Google AI Pro subscription** via Antigravity (Google's Cloud Code Ass
 
 The plugin adds Google account authentication via OAuth, model discovery, and the transport required to run Gemini and Claude models from OpenFox.
 
+This project is inspired by [opencode-antigravity-auth](https://github.com/NoeFabris/opencode-antigravity-auth).
+
 ---
 
 <details open>
