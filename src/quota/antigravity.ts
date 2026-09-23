@@ -280,6 +280,9 @@ export class AntigravityQuotaProvider implements QuotaProvider {
     if (registry && typeof registry.registerQuotaProvider === 'function') {
       registry.registerQuotaProvider(this)
     }
+
+    // 4. Eagerly sync quota sources with openfox-quota
+    void this.getQuota().catch(() => {})
   }
 
   private submitSourcesToGlobalManager(
