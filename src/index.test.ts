@@ -41,6 +41,53 @@ describe('openfox-google-antigravity plugin', () => {
     expect(registry.registerTransport).toHaveBeenCalledWith(expect.objectContaining({ id: 'google-antigravity-transport' }))
     expect(registry.registerPreset).toHaveBeenCalledWith(expect.objectContaining({ id: 'google-antigravity' }))
   })
+
+  it('registers quota provider, RPCs, tool, and hook when available', async () => {
+    const configDirectory = await mkdtemp(join(tmpdir(), 'openfox-google-antigravity-'))
+    const rpcs: Record<string, Function> = {}
+    let registeredTool: any
+    let registeredHook: any
+
+    const registry: any = {
+      runtime: { mode: 'development', configDirectory },
+      registerAuth: vi.fn(),
+      registerTransport: vi.fn(),
+      registerPreset: vi.fn(),
+      registerQuotaProvider: vi.fn(),
+      registerRpc: vi.fn((method, handler) => {
+        rpcs[method] = handler
+      }),
+      registerTool: vi.fn((tool) => {
+        registeredTool = tool
+      }),
+      registerHook: vi.fn((event, handler) => {
+        if (event === 'turn.completed') registeredHook = handler
+      }),
+    }
+
+    await register(registry)
+    expect(registry.registerQuotaProvider).toHaveBeenCalledWith(expect.objectContaining({ id: 'google-antigravity' }))
+    expect(registry.registerRpc).toHaveBeenCalledWith('antigravity.getQuota', expect.any(Function))
+    expect(registry.registerRpc).toHaveBeenCalledWith('antigravity.syncQuota', expect.any(Function))
+    expect(registry.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'get_antigravity_quota' }))
+    expect(registry.registerHook).toHaveBeenCalledWith('turn.completed', expect.any(Function))
+
+    // Test getQuota RPC
+    const quotaResult = await rpcs['antigravity.getQuota']?.({})
+    expect(quotaResult?.sources).toBeDefined()
+
+    // Test syncQuota RPC
+    const syncResult = await rpcs['antigravity.syncQuota']?.()
+    expect(syncResult?.success).toBe(true)
+
+    // Test tool execution
+    const toolExec = await registeredTool.execute({}, {})
+    expect(toolExec.success).toBe(true)
+    expect(toolExec.output).toContain('sources')
+
+    // Test hook execution
+    await expect(registeredHook?.()).resolves.toBeUndefined()
+  })
 })
 
 describe('AntigravityAuthAdapter.beginLogin', () => {

@@ -60,6 +60,31 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
 
         const credentialRef = await this.credentials.create(credential)
         console.log('[openfox-google-antigravity] Credential saved:', credentialRef)
+
+        // Immediately push live quota source to global quota manager upon login
+        try {
+          const globalQuotaKey = Symbol.for('openfox.quotaManager')
+          const globalMgr = (globalThis as any)[globalQuotaKey]
+          if (globalMgr) {
+            const resetsAt = new Date(Date.now() + 86400000).toISOString()
+            const source = {
+              id: `antigravity-cred-${credentialRef}`,
+              name: email ? `Google Antigravity (${email})` : `Google Antigravity`,
+              metrics: [
+                { kind: 'windowed' as const, model: 'Gemini', label: 'Requests', used: 0, limit: 4000, window: 'day' as const, resetsAt },
+                { kind: 'windowed' as const, model: 'Claude', label: 'Requests', used: 0, limit: 4000, window: 'day' as const, resetsAt },
+                { kind: 'windowed' as const, model: 'GPT-OSS', label: 'Requests', used: 0, limit: 4000, window: 'day' as const, resetsAt },
+              ],
+            }
+            if (typeof globalMgr.submitSource === 'function') {
+              globalMgr.submitSource(source)
+            }
+            if (typeof globalMgr.refresh === 'function') {
+              globalMgr.refresh().catch(() => {})
+            }
+          }
+        } catch {}
+
         return { credentialRef }
       } catch (err) {
         console.error('[openfox-google-antigravity] OAuth completion failed:', err)

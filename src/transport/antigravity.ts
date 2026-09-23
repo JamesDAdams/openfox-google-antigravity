@@ -331,7 +331,10 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
             if (parsed.finishReason) finishReason = parsed.finishReason
             if (parsed.usage) usage = parsed.usage
             if (parsed.toolCalls) {
-              for (const tc of parsed.toolCalls) toolCalls.set(crypto.randomUUID(), { name: tc.name, args: tc.args })
+              for (const tc of parsed.toolCalls) {
+                const key = tc.id || tc.name
+                toolCalls.set(key, { name: tc.name, args: tc.args })
+              }
             }
           }
           break
@@ -349,7 +352,10 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
           if (parsed.finishReason) finishReason = parsed.finishReason
           if (parsed.usage) usage = parsed.usage
           if (parsed.toolCalls) {
-            for (const tc of parsed.toolCalls) toolCalls.set(crypto.randomUUID(), { name: tc.name, args: tc.args })
+            for (const tc of parsed.toolCalls) {
+              const key = tc.id || tc.name
+              toolCalls.set(key, { name: tc.name, args: tc.args })
+            }
           }
         }
       }
@@ -384,7 +390,7 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
     thinking?: string
     finishReason?: LLMCompletionResponse['finishReason']
     usage?: LLMCompletionResponse['usage']
-    toolCalls?: Array<{ name: string; args: string }>
+    toolCalls?: Array<{ id?: string; name: string; args: string }>
   } | null {
     let parsed: any
     try {
@@ -406,15 +412,15 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
 
     let text = ''
     let thinking = ''
-    const toolCalls: Array<{ name: string; args: string }> = []
+    const toolCalls: Array<{ id?: string; name: string; args: string }> = []
     if (parts?.length) {
       for (const part of parts) {
         if (part.thought) thinking += part.thought
         else if (part.thinking) thinking += part.thinking
         if (part.text) text += part.text
-        const fc = (part as any).functionCall as { name?: string; args?: unknown } | undefined
+        const fc = (part as any).functionCall as { id?: string; name?: string; args?: unknown } | undefined
         if (fc?.name) {
-          toolCalls.push({ name: fc.name, args: typeof fc.args === 'string' ? fc.args : JSON.stringify(fc.args ?? {}) })
+          toolCalls.push({ id: fc.id, name: fc.name, args: typeof fc.args === 'string' ? fc.args : JSON.stringify(fc.args ?? {}) })
         }
       }
     }
@@ -427,7 +433,7 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
       thinking?: string
       finishReason?: LLMCompletionResponse['finishReason']
       usage?: LLMCompletionResponse['usage']
-      toolCalls?: Array<{ name: string; args: string }>
+      toolCalls?: Array<{ id?: string; name: string; args: string }>
     } = {}
     if (text) data.text = text
     if (thinking) data.thinking = thinking

@@ -1,40 +1,50 @@
 {
   "name": "openfox-google-antigravity",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Google Antigravity (Cloud Code Assist) account provider plugin for OpenFox",
-  "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "type": "module",
   "files": [
     "dist",
     "README.md",
     "LICENSE"
   ],
-  "openfox": {
-    "apiVersion": 1,
-    "plugin": "./dist/index.js"
-  },
   "scripts": {
     "build": "tsup",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run --config vitest.config.ts"
+    "test": "vitest run --passWithNoTests --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
   },
-  "author": "James Adams",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/JamesDAdams/openfox-google-antigravity.git"
+  "openfox": {
+    "apiVersion": 2,
+    "displayName": "Google Antigravity",
+    "description": "Use your Google AI Pro subscription via Cloud Code Assist OAuth authentication with live quota tracking.\n<span class=\"text-accent-error font-medium\">⚠️ Using this plugin violates Google's Terms of Service.</span>",
+    "icon": "https://brandlogos.net/wp-content/uploads/2025/12/google_antigravity-logo_brandlogos.net_qu4jc.png",
+    "entry": "./dist/index.js",
+    "capabilities": [
+      "tools",
+      "hooks",
+      "rpc",
+      "presets"
+    ],
+    "timeoutMs": 15000
   },
   "peerDependencies": {
     "openfox": ">=2.0.56 <3"
   },
   "devDependencies": {
     "@types/node": "^22.19.15",
-    "typescript": "^5.7.3",
     "tsup": "^8.4.0",
+    "typescript": "^5.7.3",
     "vitest": "^4.1.2"
   },
-  "license": "MIT",
   "engines": {
     "node": ">=19"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JamesDAdams/openfox-google-antigravity.git"
+  },
+  "author": "James Adams",
+  "license": "MIT"
 }
