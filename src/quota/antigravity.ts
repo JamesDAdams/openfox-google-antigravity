@@ -70,8 +70,6 @@ export class AntigravityQuotaProvider implements QuotaProvider {
     const discovered: AntigravityProviderAccount[] = []
     const seenEmails = new Set<string>()
     const seenIds = new Set<string>()
-    let activeCredRefs: Set<string> | null = null
-    let hasConfigProviders = false
 
     // 1. Scan OpenFox config.json in configDirectory
     if (this.configDirectory) {
@@ -80,8 +78,6 @@ export class AntigravityQuotaProvider implements QuotaProvider {
         const raw = await readFile(configPath, 'utf8')
         const data = JSON.parse(raw)
         if (Array.isArray(data.providers)) {
-          hasConfigProviders = true
-          activeCredRefs = new Set()
           for (const p of data.providers) {
             if (!p || typeof p !== 'object') continue
             const backend = String(p.backend || '').toLowerCase()
@@ -95,9 +91,6 @@ export class AntigravityQuotaProvider implements QuotaProvider {
               transport === 'google-antigravity-transport' ||
               authAdapter === 'google-antigravity-auth'
 
-            if (isAntigravity && p.credentialRef) {
-              activeCredRefs.add(String(p.credentialRef))
-            }
             if (isAntigravity && p.apiKey && !p.credentialRef && !seenIds.has(String(p.id))) {
               seenIds.add(String(p.id))
               discovered.push({
@@ -113,15 +106,11 @@ export class AntigravityQuotaProvider implements QuotaProvider {
       }
     }
 
-    // 2. Scan plugin credential store (only include credentials that belong to active providers, or if no config providers list)
+    // 2. Scan plugin credential store for all connected Google accounts
     try {
       if (typeof this.credentials.listReferences === 'function') {
         const references = await this.credentials.listReferences()
         for (const ref of references) {
-          if (hasConfigProviders && activeCredRefs && !activeCredRefs.has(ref)) {
-            // Credential belongs to a deleted/inactive provider
-            continue
-          }
           const cred = (await this.credentials.get(ref)) as AntigravityCredential | undefined
           if (cred?.refreshToken) {
             const email = cred.email

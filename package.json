@@ -25,7 +25,8 @@
       "tools",
       "hooks",
       "rpc",
-      "presets"
+      "presets",
+      "settings"
     ],
     "timeoutMs": 15000
   },

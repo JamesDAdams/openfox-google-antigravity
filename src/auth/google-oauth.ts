@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
-import { ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET, ANTIGRAVITY_SCOPES, ANTIGRAVITY_REDIRECT_PORT, ANTIGRAVITY_ENDPOINTS, ANTIGRAVITY_DEFAULT_PROJECT_ID } from '../constants.js'
+import { ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET, ANTIGRAVITY_SCOPES, ANTIGRAVITY_REDIRECT_PORT, ANTIGRAVITY_LOAD_ENDPOINTS, ANTIGRAVITY_DEFAULT_PROJECT_ID, getAntigravityHeaders } from '../constants.js'
 
 function base64url(buffer: Buffer): string {
   return buffer.toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
@@ -128,19 +128,22 @@ export async function fetchUserEmail(accessToken: string): Promise<string | unde
 }
 
 export async function fetchProjectId(accessToken: string): Promise<string> {
-  for (const endpoint of ANTIGRAVITY_ENDPOINTS) {
+  const antigravityHeaders = getAntigravityHeaders()
+
+  for (const endpoint of ANTIGRAVITY_LOAD_ENDPOINTS) {
     try {
       const res = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
-          'User-Agent': 'OpenFox',
+          'User-Agent': antigravityHeaders['User-Agent'],
+          'Client-Metadata': antigravityHeaders['Client-Metadata'],
         },
         body: JSON.stringify({
           metadata: {
             ideType: 'ANTIGRAVITY',
-            platform: 'PLATFORM_UNSPECIFIED',
+            platform: process.platform === 'win32' ? 'WINDOWS' : 'MACOS',
             pluginType: 'GEMINI',
           },
         }),

@@ -66,9 +66,34 @@ export interface PluginContext {
 }
 
 declare module 'openfox/provider' {
+  interface ModelConfig {
+    modes?: Array<{ level: string; apiModelId: string; name?: string }>
+    reasoningEfforts?: string[]
+    thinkingLevel?: string
+  }
+
   interface ProviderPluginRegistry {
     context?: PluginContext
+    registerSettings?(schema: {
+      fields: Array<{
+        key: string
+        type: string
+        label: LocalizedString
+        description?: LocalizedString
+        default?: unknown
+      }>
+    }): void
     registerQuotaProvider?(provider: QuotaProvider): void
+    registerUiOverride?(override: {
+      id: string
+      zone: string
+      mode: 'hide' | 'replace'
+      order?: number
+      visibleWhen?: { eq?: Record<string, unknown>; neq?: Record<string, unknown> }
+      replacement?: unknown
+      /** Live content fetched by the host with the zone context (e.g. providerId). */
+      contentSource?: { kind: 'rpc'; method: string; refreshMs?: number }
+    }): void
     registerHook?(event: string, handler: (payload: any) => void | Promise<void>): void
     registerRpc?(
       method: string,

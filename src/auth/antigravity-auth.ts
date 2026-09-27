@@ -1,17 +1,38 @@
 import type { ProviderAccessContext, ProviderAuthAdapter, ProviderAuthStatus, ProviderLoginChallenge } from 'openfox/provider'
 import type { ProviderCredentialStore } from '../credentials/credential-store.js'
 import { generatePKCE, buildAuthUrl, startOAuthServer, exchangeCode, refreshAccessToken, fetchUserEmail, fetchProjectId } from './google-oauth.js'
+import { ANTIGRAVITY_VERSION } from '../constants.js'
 
 export interface AntigravityCredential {
+  providerId?: string
   refreshToken: string
   accessToken?: string
   accessExpiresAt?: number
   email?: string
   projectId?: string
+  priority?: number
+  cost?: number
+  disabled?: boolean
+  lastUsedAt?: number
+  failureCount?: number
+  cooldownUntil?: number
+}
+
+export interface AntigravityAccountInfo {
+  providerId?: string
+  credentialRef: string
+  email?: string
+  projectId?: string
+  priority?: number
+  cost?: number
+  disabled?: boolean
+  lastUsedAt?: number
+  status: 'connected' | 'expired' | 'error'
 }
 
 export class AntigravityAuthAdapter implements ProviderAuthAdapter {
   readonly id = 'google-antigravity-auth'
+  public onAccountChange?: (providerId?: string) => void
   private readonly activeLogins = new Map<string, {
     challenge: ProviderLoginChallenge
     completion: Promise<{ credentialRef: string }>
@@ -50,7 +71,23 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
         const projectId = await fetchProjectId(tokens.access_token)
         console.log('[openfox-google-antigravity] User info fetched, saving credential...')
 
+        // Check if an existing credential for this email already exists for the
+        // same provider — accounts are owned by the provider that created them.
+        let existingRef: string | null = null
+        if (typeof this.credentials.listReferences === 'function') {
+          const refs = await this.credentials.listReferences()
+          for (const ref of refs) {
+            const existingCred = (await this.credentials.get(ref)) as AntigravityCredential | undefined
+            const matchEmail = existingCred?.email && email && existingCred.email.toLowerCase() === email.toLowerCase()
+            if (matchEmail && existingCred?.providerId === context.providerId) {
+              existingRef = ref
+              break
+            }
+          }
+        }
+
         const credential: AntigravityCredential = {
+          providerId: context.providerId,
           refreshToken: tokens.refresh_token,
           accessToken: tokens.access_token,
           accessExpiresAt: Date.now() + tokens.expires_in * 1000,
@@ -58,8 +95,19 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
           projectId,
         }
 
-        const credentialRef = await this.credentials.create(credential)
-        console.log('[openfox-google-antigravity] Credential saved:', credentialRef)
+        let credentialRef: string
+        if (existingRef) {
+          await this.credentials.set(existingRef, credential)
+          credentialRef = existingRef
+          console.log('[openfox-google-antigravity] Existing credential updated:', credentialRef)
+        } else {
+          credentialRef = await this.credentials.create(credential)
+          console.log('[openfox-google-antigravity] New credential created:', credentialRef)
+        }
+
+        try {
+          this.onAccountChange?.(context.providerId)
+        } catch {}
 
         // Immediately push live quota source to global quota manager upon login
         try {
@@ -100,9 +148,21 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
   }
 
   async getStatus(context: { providerId: string; credentialRef?: string }): Promise<ProviderAuthStatus> {
+    const accounts = await this.listAccounts(context.providerId)
+    if (accounts.length > 0) {
+      const active = accounts.filter((a) => a.status === 'connected')
+      if (active.length > 0) {
+        const primary = (context.credentialRef && accounts.find((a) => a.credentialRef === context.credentialRef)) || active[0]
+        const label = accounts.length > 1
+          ? `${primary?.email ?? 'Google Account'} (+${accounts.length - 1})`
+          : primary?.email ?? 'Google Account'
+        return { state: 'connected', accountLabel: label }
+      }
+    }
+
     if (!context.credentialRef) return { state: 'disconnected' }
 
-    const credential = await this.credentials.get(context.credentialRef) as AntigravityCredential | undefined
+    const credential = (await this.credentials.get(context.credentialRef)) as AntigravityCredential | undefined
     if (!credential) return { state: 'disconnected' }
 
     if (credential.refreshToken) {
@@ -112,8 +172,74 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
     return { state: 'expired', accountLabel: credential.email, error: 'No refresh token available' }
   }
 
+  /**
+   * Accounts owned by `providerId`. An account always belongs to exactly one
+   * provider, so without a provider id there is nothing to list — never fall
+   * back to another provider's accounts.
+   */
+  async listAccounts(providerId?: string): Promise<AntigravityAccountInfo[]> {
+    if (!providerId) return []
+    if (typeof this.credentials.listReferences !== 'function') return []
+    const refs = await this.credentials.listReferences()
+    const result: AntigravityAccountInfo[] = []
+
+    for (const ref of refs) {
+      const cred = (await this.credentials.get(ref)) as AntigravityCredential | undefined
+      if (!cred) continue
+      if (cred.providerId !== providerId) continue
+      result.push({
+        providerId: cred.providerId,
+        credentialRef: ref,
+        email: cred.email,
+        projectId: cred.projectId,
+        priority: cred.priority,
+        cost: cred.cost,
+        disabled: cred.disabled,
+        lastUsedAt: cred.lastUsedAt,
+        status: cred.refreshToken ? 'connected' : 'expired',
+      })
+    }
+
+    return result
+  }
+
+  /** Whether `credentialRef` is an account owned by `providerId`. */
+  async ownsAccount(providerId: string | undefined, credentialRef: string): Promise<boolean> {
+    if (!providerId) return false
+    const accounts = await this.listAccounts(providerId)
+    return accounts.some((account) => account.credentialRef === credentialRef)
+  }
+
+  /**
+   * Re-link accounts whose stored owner is unknown (credentials created before
+   * accounts were provider-scoped, or with a placeholder id). Only safe when a
+   * single Antigravity provider exists — with several we cannot guess which one
+   * owns them, so they are left untouched and reported.
+   */
+  async relinkOrphanedAccounts(knownProviderIds: string[]): Promise<{ relinked: number; orphaned: number }> {
+    if (typeof this.credentials.listReferences !== 'function') return { relinked: 0, orphaned: 0 }
+    const refs = await this.credentials.listReferences()
+    const known = new Set(knownProviderIds)
+    let relinked = 0
+    let orphaned = 0
+
+    for (const ref of refs) {
+      const cred = (await this.credentials.get(ref)) as AntigravityCredential | undefined
+      if (!cred || (cred.providerId && known.has(cred.providerId))) continue
+      if (knownProviderIds.length !== 1) {
+        orphaned++
+        continue
+      }
+      cred.providerId = knownProviderIds[0]
+      await this.credentials.set(ref, cred)
+      relinked++
+    }
+
+    return { relinked, orphaned }
+  }
+
   async getAccessContext(credentialRef: string): Promise<ProviderAccessContext> {
-    const credential = await this.credentials.get(credentialRef) as AntigravityCredential | undefined
+    const credential = (await this.credentials.get(credentialRef)) as AntigravityCredential | undefined
     if (!credential) throw new Error('Antigravity credential not found')
     if (!credential.refreshToken) throw new Error('No refresh token available')
 
@@ -125,9 +251,9 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
       await this.credentials.set(credentialRef, credential)
     }
 
-    const platform = process.platform === 'win32' ? 'win32' : 'darwin'
     const arch = process.arch === 'x64' ? 'x64' : 'arm64'
-    const userAgent = `antigravity/2.0.6 ${platform}/${arch}`
+    const uaPlatform = process.platform === 'win32' ? 'win32' : 'darwin'
+    const userAgent = `antigravity/${ANTIGRAVITY_VERSION} ${uaPlatform}/${arch}`
 
     return {
       accessToken: credential.accessToken!,
@@ -140,17 +266,39 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
   }
 
   async getOAuthToken(credentialRef: string): Promise<string> {
-    const credential = await this.credentials.get(credentialRef) as AntigravityCredential | undefined
+    const credential = (await this.credentials.get(credentialRef)) as AntigravityCredential | undefined
     if (!credential?.refreshToken) throw new Error('Refresh token not found')
     return credential.refreshToken
   }
 
   async getProjectId(credentialRef: string): Promise<string | undefined> {
-    const credential = await this.credentials.get(credentialRef) as AntigravityCredential | undefined
+    const credential = (await this.credentials.get(credentialRef)) as AntigravityCredential | undefined
     return credential?.projectId
   }
 
   async logout(credentialRef: string): Promise<void> {
     await this.credentials.delete(credentialRef)
+  }
+
+  /** Remove every account owned by the deleted provider. */
+  async deleteProvider(providerId: string): Promise<void> {
+    if (typeof this.credentials.listReferences !== 'function') return
+    const refs = await this.credentials.listReferences()
+    for (const ref of refs) {
+      const cred = (await this.credentials.get(ref)) as AntigravityCredential | undefined
+      if (cred && cred.providerId === providerId) {
+        await this.credentials.delete(ref)
+      }
+    }
+  }
+
+  async updateAccount(
+    credentialRef: string,
+    updates: Partial<Pick<AntigravityCredential, 'priority' | 'cost' | 'disabled'>>,
+  ): Promise<void> {
+    const cred = (await this.credentials.get(credentialRef)) as AntigravityCredential | undefined
+    if (!cred) throw new Error(`Account not found: ${credentialRef}`)
+    Object.assign(cred, updates)
+    await this.credentials.set(credentialRef, cred)
   }
 }
