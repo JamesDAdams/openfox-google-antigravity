@@ -65,6 +65,11 @@ describe('openfox-google-antigravity plugin', () => {
             key: 'modelsConfig',
             type: 'textarea',
           }),
+          expect.objectContaining({
+            key: 'mergeSubscriptions',
+            type: 'boolean',
+            default: true,
+          }),
         ]),
       }),
     )
@@ -881,6 +886,72 @@ describe('account ownership and auth UI', () => {
     const sources = await rpcs['antigravity.getQuota']?.({})
 
     expect(sources?.sources?.length).toBeGreaterThan(0)
+  })
+
+  it('renders full width cards and handles account reordering with priority', async () => {
+    const { rpcs, store, publish } = await setupPlugin()
+    // Add a second account to provider-1
+    await store.create({
+      providerId: 'provider-1',
+      refreshToken: 't1-b',
+      email: 'user1b@example.com',
+      priority: 1,
+    })
+
+    const ui = await rpcs['antigravity.getAuthUi']?.({ providerId: 'provider-1' })
+    expect(ui.content.className).toContain('w-full')
+    expect(ui.content.align).toBe('stretch')
+
+    const accountsStack = ui.content.children.find((c: any) => c.children?.some((child: any) => child.type === 'card'))
+    expect(accountsStack.className).toContain('w-full')
+    expect(accountsStack.align).toBe('stretch')
+    const cards = accountsStack.children.filter((c: any) => c.type === 'card')
+    expect(cards).toHaveLength(2)
+    expect(cards[0].className).toContain('w-full')
+
+    // First card should have up button disabled, second card down button disabled
+    const firstButtons = cards[0].children[0].children[1].children
+    const secondButtons = cards[1].children[0].children[1].children
+    const firstUp = firstButtons.find((b: any) => b.label?.en === '↑')
+    const firstDown = firstButtons.find((b: any) => b.label?.en === '↓')
+    const secondUp = secondButtons.find((b: any) => b.label?.en === '↑')
+    const secondDown = secondButtons.find((b: any) => b.label?.en === '↓')
+
+    expect(firstUp.disabled).toBe(true)
+    expect(firstDown.disabled).toBe(false)
+    expect(secondUp.disabled).toBe(false)
+    expect(secondDown.disabled).toBe(true)
+
+    // Reorder: move second account up
+    const listBefore = await rpcs['antigravity.listAccounts']?.({ providerId: 'provider-1' })
+    const secondRef = listBefore.accounts[1].credentialRef
+    const reorderRes = await rpcs['antigravity.reorderAccount']?.({
+      providerId: 'provider-1',
+      credentialRef: secondRef,
+      direction: 'up',
+    })
+    expect(reorderRes.success).toBe(true)
+
+    // Check new order in listAccounts
+    const listAfter = await rpcs['antigravity.listAccounts']?.({ providerId: 'provider-1' })
+    expect(listAfter.accounts[0].email).toBe('user1b@example.com')
+    expect(listAfter.accounts[1].email).toBe('user1@example.com')
+    expect(listAfter.accounts[0].priority).toBe(0)
+    expect(listAfter.accounts[1].priority).toBe(1)
+    expect(publish).toHaveBeenCalledWith(undefined, 'content', expect.anything())
+  })
+
+  it('displays a loading callout and disables connect button during authentication', async () => {
+    const { buildDeclarativeAuthComponent } = await import('./ui.js')
+    const ui: any = buildDeclarativeAuthComponent([], {}, 'provider-1', true)
+
+    const loadingCallout = ui.children.find((c: any) => c.type === 'callout' && c.tone === 'warning')
+    expect(loadingCallout).toBeDefined()
+    expect(loadingCallout.title?.en).toContain('Connecting')
+
+    const connectButton = ui.children.find((c: any) => c.type === 'button')
+    expect(connectButton.disabled).toBe(true)
+    expect(connectButton.label?.en).toContain('Connecting')
   })
 })
 

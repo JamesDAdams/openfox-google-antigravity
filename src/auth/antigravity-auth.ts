@@ -86,6 +86,7 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
           }
         }
 
+        const existingAccounts = await this.listAccounts(context.providerId)
         const credential: AntigravityCredential = {
           providerId: context.providerId,
           refreshToken: tokens.refresh_token,
@@ -93,6 +94,7 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
           accessExpiresAt: Date.now() + tokens.expires_in * 1000,
           email,
           projectId,
+          priority: existingAccounts.length,
         }
 
         let credentialRef: string
@@ -145,6 +147,11 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
     const loginObj = { challenge, completion }
     this.activeLogins.set(context.providerId, loginObj)
     return loginObj
+  }
+
+  isLoginInProgress(providerId?: string): boolean {
+    if (!providerId) return false
+    return this.activeLogins.has(providerId)
   }
 
   async getStatus(context: { providerId: string; credentialRef?: string }): Promise<ProviderAuthStatus> {
@@ -200,7 +207,29 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
       })
     }
 
+    result.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))
     return result
+  }
+
+  async reorderAccount(providerId: string, credentialRef: string, direction: 'up' | 'down'): Promise<void> {
+    const accounts = await this.listAccounts(providerId)
+    const index = accounts.findIndex((a) => a.credentialRef === credentialRef)
+    if (index === -1) return
+    const targetIndex = direction === 'up' ? index - 1 : index + 1
+    if (targetIndex < 0 || targetIndex >= accounts.length) return
+
+    const [moved] = accounts.splice(index, 1)
+    if (!moved) return
+    accounts.splice(targetIndex, 0, moved)
+
+    for (let i = 0; i < accounts.length; i++) {
+      const acc = accounts[i]!
+      await this.updateAccount(acc.credentialRef, { priority: i })
+    }
+
+    try {
+      this.onAccountChange?.(providerId)
+    } catch {}
   }
 
   /** Whether `credentialRef` is an account owned by `providerId`. */

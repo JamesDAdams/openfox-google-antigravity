@@ -41,9 +41,9 @@ describe('AntigravityQuotaProvider', () => {
     const claude = quota.metrics.find((m) => m.model === 'Claude')
     const gptOss = quota.metrics.find((m) => m.model === 'GPT-OSS')
 
-    expect(gemini).toMatchObject({ kind: 'windowed', model: 'Gemini', label: 'Requests', used: 0, limit: 4000, window: 'day' })
-    expect(claude).toMatchObject({ kind: 'windowed', model: 'Claude', label: 'Requests', used: 0, limit: 4000, window: 'day' })
-    expect(gptOss).toMatchObject({ kind: 'windowed', model: 'GPT-OSS', label: 'Requests', used: 0, limit: 4000, window: 'day' })
+    expect(gemini).toMatchObject({ kind: 'windowed', model: 'Gemini', label: 'Requests', used: 0, limit: 1000, window: 'day' })
+    expect(claude).toMatchObject({ kind: 'windowed', model: 'Claude', label: 'Requests', used: 0, limit: 1000, window: 'day' })
+    expect(gptOss).toMatchObject({ kind: 'windowed', model: 'GPT-OSS', label: 'Requests', used: 0, limit: 1000, window: 'day' })
   })
 
   it('discovers providers from config.json, credential store, and env variables', async () => {
@@ -123,5 +123,122 @@ describe('AntigravityQuotaProvider', () => {
     const syncResult = await provider.syncQuota()
     expect(syncResult.success).toBe(true)
     expect(syncResult.sources).toBeDefined()
+  })
+
+  it('merges multiple identical subscriptions by default into a single card with summed limits', async () => {
+    const store = makeStore()
+    await store.create({ email: 'user1@google.com', refreshToken: 't1' })
+    await store.create({ email: 'user2@google.com', refreshToken: 't2' })
+
+    const provider = new AntigravityQuotaProvider(store, {
+      getSettings: () => ({ mergeSubscriptions: true }),
+    })
+
+    const quota = await provider.getQuota()
+    expect(quota.id).toBe('google-antigravity')
+    expect(quota.name).toContain('2 accounts')
+    const gemini = quota.metrics.find((m) => m.model === 'Gemini')
+    expect(gemini?.kind === 'windowed' ? gemini.limit : 0).toBe(2000)
+    const claude = quota.metrics.find((m) => m.model === 'Claude')
+    expect(claude?.kind === 'windowed' ? claude.limit : 0).toBe(2000)
+  })
+
+  it('fetches real quota from fetchAvailableModels and calculates percentage and reset time', async () => {
+    const store = makeStore()
+    await store.create({ email: 'user@google.com', refreshToken: 'test-refresh-token', accessToken: 'live-access-token' })
+
+    const mockFetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        models: {
+          'claude-opus-4-6-thinking': {
+            displayName: 'Claude Opus 4.6 Thinking',
+            quotaInfo: {
+              remainingFraction: 1.0,
+              resetTime: '2026-09-27T23:44:00Z',
+            },
+          },
+          'gemini-3.7-flash-tiered': {
+            displayName: 'Gemini 3.7 Flash Tiered',
+            quotaInfo: {
+              remainingFraction: 0.0,
+              resetTime: '2026-09-27T20:09:00Z',
+            },
+          },
+          'gemini-3.1-pro-low': {
+            displayName: 'Gemini 3.1 Pro Low',
+            quotaInfo: {
+              remainingFraction: 0.8,
+              resetTime: '2026-09-27T20:09:00Z',
+            },
+          },
+        },
+      }),
+    })
+
+    const provider = new AntigravityQuotaProvider(store, { fetcher: mockFetcher })
+    const quota = await provider.getQuota()
+
+    expect(quota.metrics).toHaveLength(3)
+
+    const gemini = quota.metrics.find((m) => m.model === 'Gemini')
+    expect(gemini).toMatchObject({
+      kind: 'windowed',
+      used: 1000,
+      limit: 1000,
+      resetsAt: '2026-09-27T20:09:00Z',
+    })
+
+    const claude = quota.metrics.find((m) => m.model === 'Claude')
+    expect(claude).toMatchObject({
+      kind: 'windowed',
+      used: 0,
+      limit: 1000,
+      resetsAt: '2026-09-27T23:44:00Z',
+    })
+
+    const gptOss = quota.metrics.find((m) => m.model === 'GPT-OSS')
+    expect(gptOss).toMatchObject({
+      kind: 'windowed',
+      used: 0,
+      limit: 1000,
+    })
+  })
+
+  it('correctly handles exhausted quota where remainingFraction is omitted by Google API', async () => {
+    const store = makeStore()
+    await store.create({ email: 'user@google.com', refreshToken: 'test-token', accessToken: 'live-token' })
+
+    const mockFetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        models: {
+          'gemini-3.7-flash-tiered': {
+            displayName: 'Gemini 3.7 Flash Tiered',
+            quotaInfo: {
+              resetTime: '2026-09-27T18:10:14Z',
+            },
+          },
+          'claude-opus-4-6-thinking': {
+            displayName: 'Claude Opus 4.6 Thinking',
+            quotaInfo: {
+              remainingFraction: 1.0,
+              resetTime: '2026-09-27T22:44:22Z',
+            },
+          },
+        },
+      }),
+    })
+
+    const provider = new AntigravityQuotaProvider(store, { fetcher: mockFetcher })
+    const quota = await provider.getQuota()
+
+    const gemini = quota.metrics.find((m) => m.model === 'Gemini')
+    expect(gemini).toMatchObject({
+      kind: 'windowed',
+      used: 1000,
+      limit: 1000,
+      resetsAt: '2026-09-27T18:10:14Z',
+    })
   })
 })

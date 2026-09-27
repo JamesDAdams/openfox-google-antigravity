@@ -107,3 +107,4 @@ declare module 'openfox/provider' {
     }): void
   }
 }
+

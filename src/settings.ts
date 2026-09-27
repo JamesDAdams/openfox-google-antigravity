@@ -6,11 +6,13 @@ export interface AntigravityPluginSettings {
   routingStrategy: RoutingStrategy
   roundRobinStickyLimit: number
   modelsConfig?: string
+  mergeSubscriptions?: boolean
 }
 
 export const DEFAULT_SETTINGS: AntigravityPluginSettings = {
   routingStrategy: 'fill-first',
   roundRobinStickyLimit: 3,
+  mergeSubscriptions: true,
 }
 
 export class PluginSettingsStore {
@@ -30,6 +32,10 @@ export class PluginSettingsStore {
             ? parsed.roundRobinStickyLimit
             : DEFAULT_SETTINGS.roundRobinStickyLimit,
         modelsConfig: parsed.modelsConfig,
+        mergeSubscriptions:
+          typeof parsed.mergeSubscriptions === 'boolean'
+            ? parsed.mergeSubscriptions
+            : DEFAULT_SETTINGS.mergeSubscriptions,
       }
       return this.cached
     } catch {
@@ -49,6 +55,10 @@ export class PluginSettingsStore {
       roundRobinStickyLimit: !isNaN(parsedSticky) && parsedSticky > 0 ? parsedSticky : current.roundRobinStickyLimit,
       modelsConfig:
         typeof values['modelsConfig'] === 'string' ? values['modelsConfig'] : current.modelsConfig,
+      mergeSubscriptions:
+        typeof values['mergeSubscriptions'] === 'boolean'
+          ? values['mergeSubscriptions']
+          : current.mergeSubscriptions ?? true,
     }
 
     await mkdir(dirname(this.settingsPath), { recursive: true })

@@ -101,6 +101,20 @@ export async function register(registry: ProviderPluginRegistry): Promise<void> 
           default: JSON.stringify(DEFAULT_ANTIGRAVITY_MODELS, null, 2),
           defaultValue: JSON.stringify(DEFAULT_ANTIGRAVITY_MODELS, null, 2),
         },
+        {
+          key: 'mergeSubscriptions',
+          type: 'boolean',
+          label: {
+            en: 'Merge identical subscriptions',
+            fr: 'Fusionner les abonnements identiques',
+          },
+          description: {
+            en: 'Combine multiple accounts for the same provider (e.g. 4 Google Antigravity subscriptions) into a single card with summed quota limits.',
+            fr: 'Combiner plusieurs comptes d’un même fournisseur (ex. 4 abonnements Google Antigravity) en une seule carte avec les quotas cumulés.',
+          },
+          default: true,
+          defaultValue: true,
+        },
       ],
     })
   }
@@ -110,6 +124,7 @@ export async function register(registry: ProviderPluginRegistry): Promise<void> 
 
   const quotaProvider = new AntigravityQuotaProvider(credentials, {
     configDirectory: registry.runtime.configDirectory,
+    getSettings,
   })
 
   await quotaProvider.registerProviders(registry)
@@ -119,7 +134,8 @@ export async function register(registry: ProviderPluginRegistry): Promise<void> 
   // provider's accounts and refreshes on its own after a login/logout.
   const buildAuthContent = async (providerId?: string) => {
     const accounts = providerId ? await auth.listAccounts(providerId) : []
-    return buildDeclarativeAuthComponent(accounts, settingsStore.getCached(), providerId)
+    const isAuthenticating = providerId ? auth.isLoginInProgress(providerId) : false
+    return buildDeclarativeAuthComponent(accounts, settingsStore.getCached(), providerId, isAuthenticating)
   }
 
   const publishAuthContent = async (providerId?: string) => {
@@ -172,12 +188,15 @@ export async function register(registry: ProviderPluginRegistry): Promise<void> 
         return { success: false, error: 'providerId is required to link a Google account to a provider' }
       }
       const { challenge, completion } = await auth.beginLogin({ providerId })
+      void publishAuthContent(providerId)
       void completion
         .then(async () => {
           await quotaProvider.syncQuota(registry)
           await publishAuthContent(providerId)
         })
-        .catch(() => {})
+        .catch(async () => {
+          await publishAuthContent(providerId)
+        })
       // The account only exists once the OAuth flow completes; the zone's
       // contentSource picks it up, so no stale content is returned here.
       return { challenge }
@@ -186,6 +205,22 @@ export async function register(registry: ProviderPluginRegistry): Promise<void> 
     registry.registerRpc('antigravity.listAccounts', async (params) => {
       const providerId = readProviderId(params)
       return { accounts: await auth.listAccounts(providerId) }
+    })
+
+    registry.registerRpc('antigravity.reorderAccount', async (params) => {
+      const credentialRef = typeof params?.['credentialRef'] === 'string' ? params['credentialRef'] : undefined
+      const providerId = readProviderId(params)
+      const direction = params?.['direction'] === 'up' || params?.['direction'] === 'down' ? params['direction'] : undefined
+      if (!credentialRef) return { success: false, error: 'credentialRef is required' }
+      if (!providerId) return { success: false, error: 'providerId is required' }
+      if (!direction) return { success: false, error: 'direction must be "up" or "down"' }
+      if (!(await auth.ownsAccount(providerId, credentialRef))) {
+        return { success: false, error: 'Account does not belong to this provider' }
+      }
+      await auth.reorderAccount(providerId, credentialRef, direction)
+      await quotaProvider.syncQuota(registry)
+      await publishAuthContent(providerId)
+      return { success: true }
     })
 
     registry.registerRpc('antigravity.removeAccount', async (params) => {
