@@ -3,8 +3,9 @@ import type { DeclarativeNode } from 'openfox/plugin'
 export interface AntigravityAccountView {
   credentialRef: string
   email?: string
-  status?: string
+  status?: 'connected' | 'quota_exceeded' | 'verification_required' | 'expired' | 'error' | string
   priority?: number
+  lastErrorMessage?: string
 }
 
 export function buildDeclarativeAuthComponent(
@@ -12,6 +13,7 @@ export function buildDeclarativeAuthComponent(
   settings: { routingStrategy?: string; roundRobinStickyLimit?: number },
   providerId?: string,
   isAuthenticating?: boolean,
+  loginError?: string,
 ): DeclarativeNode {
   const accountCards: DeclarativeNode[] = accounts.map((acc, idx) => {
     const actionButtons: DeclarativeNode[] = []
@@ -55,22 +57,53 @@ export function buildDeclarativeAuthComponent(
       )
     }
 
-    actionButtons.push({
-      type: 'button',
-      label: { en: 'Remove', fr: 'Supprimer' },
-      variant: 'danger',
-      size: 'sm' as any,
-      action: {
-        kind: 'rpc',
-        method: 'antigravity.removeAccount',
-        params: { credentialRef: acc.credentialRef, providerId },
+    actionButtons.push(
+      {
+        type: 'button',
+        label: { en: 'Reconnect', fr: 'Reconnecter' },
+        variant: 'default',
+        size: 'sm' as any,
+        action: {
+          kind: 'rpc',
+          method: 'antigravity.addAccount',
+          params: { providerId },
+        },
+        onActivate: {
+          kind: 'rpc',
+          method: 'antigravity.addAccount',
+          params: { providerId },
+        },
       },
-      onActivate: {
-        kind: 'rpc',
-        method: 'antigravity.removeAccount',
-        params: { credentialRef: acc.credentialRef, providerId },
+      {
+        type: 'button',
+        label: { en: 'Remove', fr: 'Supprimer' },
+        variant: 'danger',
+        size: 'sm' as any,
+        action: {
+          kind: 'rpc',
+          method: 'antigravity.removeAccount',
+          params: { credentialRef: acc.credentialRef, providerId },
+        },
+        onActivate: {
+          kind: 'rpc',
+          method: 'antigravity.removeAccount',
+          params: { credentialRef: acc.credentialRef, providerId },
+        },
       },
-    })
+    )
+
+    let statusText = { en: 'Connected ✓', fr: 'Connecté ✓' }
+    let statusClass = 'text-xs text-accent-success font-medium whitespace-nowrap'
+    if (acc.status === 'quota_exceeded') {
+      statusText = { en: 'Quota Exceeded (429)', fr: 'Quota dépassé (429)' }
+      statusClass = 'text-xs text-accent-warning font-medium whitespace-nowrap'
+    } else if (acc.status === 'verification_required') {
+      statusText = { en: 'Verification Required (403)', fr: 'Vérification requise (403)' }
+      statusClass = 'text-xs text-accent-error font-medium whitespace-nowrap'
+    } else if (acc.status === 'expired' || acc.status === 'error') {
+      statusText = { en: 'Disconnected / Expired', fr: 'Déconnecté / Expiré' }
+      statusClass = 'text-xs text-text-muted whitespace-nowrap'
+    }
 
     return {
       type: 'card',
@@ -108,14 +141,8 @@ export function buildDeclarativeAuthComponent(
                     },
                     {
                       type: 'text',
-                      text: {
-                        en: acc.status === 'connected' ? 'Connected ✓' : 'Disconnected / Expired',
-                        fr: acc.status === 'connected' ? 'Connecté ✓' : 'Déconnecté / Expiré',
-                      },
-                      className:
-                        acc.status === 'connected'
-                          ? 'text-xs text-accent-success font-medium'
-                          : 'text-xs text-text-muted',
+                      text: statusText,
+                      className: statusClass,
                     },
                   ],
                 },
@@ -150,6 +177,18 @@ export function buildDeclarativeAuthComponent(
       },
     },
   ]
+
+  if (loginError && !isAuthenticating) {
+    children.push({
+      type: 'callout',
+      tone: 'danger',
+      title: {
+        en: 'Google connection failed',
+        fr: 'Échec de la connexion Google',
+      },
+      text: { en: loginError, fr: loginError },
+    })
+  }
 
   if (isAuthenticating) {
     children.push({
@@ -196,13 +235,40 @@ export function buildDeclarativeAuthComponent(
     },
     isAuthenticating
       ? {
-          type: 'button',
-          label: {
-            en: '⏳ Connecting...',
-            fr: '⏳ Connexion en cours...',
-          },
-          variant: 'primary',
-          disabled: true,
+          type: 'stack',
+          direction: 'row',
+          gap: 'sm',
+          className: 'w-full',
+          children: [
+            {
+              type: 'button',
+              label: {
+                en: '⏳ Connecting...',
+                fr: '⏳ Connexion en cours...',
+              },
+              variant: 'primary',
+              disabled: true,
+              className: 'flex-1',
+            },
+            {
+              type: 'button',
+              label: {
+                en: 'Cancel',
+                fr: 'Annuler',
+              },
+              variant: 'ghost',
+              action: {
+                kind: 'rpc',
+                method: 'antigravity.cancelLogin',
+                params: { providerId },
+              },
+              onActivate: {
+                kind: 'rpc',
+                method: 'antigravity.cancelLogin',
+                params: { providerId },
+              },
+            },
+          ],
         }
       : {
           type: 'button',

@@ -133,9 +133,15 @@ export async function register(registry: ProviderPluginRegistry): Promise<void> 
   // provider currently being configured, so the list only ever shows that
   // provider's accounts and refreshes on its own after a login/logout.
   const buildAuthContent = async (providerId?: string) => {
-    const accounts = providerId ? await auth.listAccounts(providerId) : []
+    const accounts = providerId ? await auth.listAccounts(providerId, { probeLive: true }) : []
     const isAuthenticating = providerId ? auth.isLoginInProgress(providerId) : false
-    return buildDeclarativeAuthComponent(accounts, settingsStore.getCached(), providerId, isAuthenticating)
+    return buildDeclarativeAuthComponent(
+      accounts,
+      settingsStore.getCached(),
+      providerId,
+      isAuthenticating,
+      auth.getLoginError(providerId),
+    )
   }
 
   const publishAuthContent = async (providerId?: string) => {
@@ -200,6 +206,15 @@ export async function register(registry: ProviderPluginRegistry): Promise<void> 
       // The account only exists once the OAuth flow completes; the zone's
       // contentSource picks it up, so no stale content is returned here.
       return { challenge }
+    })
+
+    registry.registerRpc('antigravity.cancelLogin', async (params) => {
+      const providerId = readProviderId(params)
+      if (providerId) {
+        auth.cancelLogin(providerId)
+        await publishAuthContent(providerId)
+      }
+      return { success: true }
     })
 
     registry.registerRpc('antigravity.listAccounts', async (params) => {

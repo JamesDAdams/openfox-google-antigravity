@@ -435,7 +435,7 @@ describe('AntigravityTransportAdapter.stream', () => {
       headers: new Headers({ 'content-type': 'text/event-stream' }),
     })
 
-    const ctx = makeContext('cred', 'gemini-3.8-flash-tiered')
+    const ctx = makeContext('cred', 'gemini-3-flash')
     const request = {
       messages: [{ role: 'user', content: 'hi' }],
       reasoningEffort: 'high',
@@ -513,6 +513,77 @@ describe('AntigravityTransportAdapter.stream', () => {
 
     const body = JSON.parse((mockFetch.mock.calls[0]?.[1] as RequestInit).body as string)
     expect(body.model).toBe('gemini-3.6-flash-medium')
+  })
+
+  it('sends the tiered ids unchanged since the catalog has no per-effort variant for 3.7 (low would 404)', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}\n\n'
+          ))
+          controller.close()
+        },
+      }),
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+    })
+
+    const request = { messages: [{ role: 'user', content: 'hi' }], reasoningEffort: 'low', signal: new AbortController().signal } as any
+    for await (const _ev of adapter.stream(request, makeContext('cred', 'gemini-3.7-flash-tiered'))) {
+      // drain
+    }
+
+    const body = JSON.parse((mockFetch.mock.calls[0]?.[1] as RequestInit).body as string)
+    expect(body.model).toBe('gemini-3.7-flash-tiered')
+  })
+
+  it('sends gemini-3.8-flash-tiered unchanged whatever the reasoning effort', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}\n\n'
+          ))
+          controller.close()
+        },
+      }),
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+    })
+
+    const request = { messages: [{ role: 'user', content: 'hi' }], reasoningEffort: 'high', signal: new AbortController().signal } as any
+    for await (const _ev of adapter.stream(request, makeContext('cred', 'gemini-3.8-flash-tiered'))) {
+      // drain
+    }
+
+    const body = JSON.parse((mockFetch.mock.calls[0]?.[1] as RequestInit).body as string)
+    expect(body.model).toBe('gemini-3.8-flash-tiered')
+  })
+
+  it('handles API error payload in SSE data stream', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'data: {"error":{"code":400,"message":"Model not supported"}}\n\n'
+          ))
+          controller.close()
+        },
+      }),
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+    })
+
+    const ctx = makeContext('cred')
+    const request = { messages: [{ role: 'user', content: 'hi' }], signal: new AbortController().signal } as any
+    const events: any[] = []
+    for await (const ev of adapter.stream(request, ctx)) {
+      events.push(ev)
+    }
+    const errEvent = events.find(e => e.type === 'error')
+    expect(errEvent).toBeDefined()
+    expect(errEvent?.error).toContain('Model not supported')
   })
 
   it('sends thinking_budget for Claude models with reasoningEffort', async () => {
@@ -922,6 +993,12 @@ describe('account ownership and auth UI', () => {
     expect(secondUp.disabled).toBe(false)
     expect(secondDown.disabled).toBe(true)
 
+    // Each card should have a Reconnect button and a Remove button
+    const firstReconnect = firstButtons.find((b: any) => b.label?.en === 'Reconnect')
+    const firstRemove = firstButtons.find((b: any) => b.label?.en === 'Remove')
+    expect(firstReconnect).toBeDefined()
+    expect(firstRemove).toBeDefined()
+
     // Reorder: move second account up
     const listBefore = await rpcs['antigravity.listAccounts']?.({ providerId: 'provider-1' })
     const secondRef = listBefore.accounts[1].credentialRef
@@ -949,9 +1026,40 @@ describe('account ownership and auth UI', () => {
     expect(loadingCallout).toBeDefined()
     expect(loadingCallout.title?.en).toContain('Connecting')
 
-    const connectButton = ui.children.find((c: any) => c.type === 'button')
+    const actionStack = ui.children.find((c: any) => c.type === 'stack' && c.children?.some((child: any) => child.label?.en?.includes('Connecting')))
+    const connectButton = actionStack?.children?.[0]
     expect(connectButton.disabled).toBe(true)
     expect(connectButton.label?.en).toContain('Connecting')
+  })
+
+  it('renders dynamic account status labels for quota exceeded and verification required', async () => {
+    const { buildDeclarativeAuthComponent } = await import('./ui.js')
+    const ui: any = buildDeclarativeAuthComponent(
+      [
+        { credentialRef: 'c1', email: 'u1@test.com', status: 'connected' },
+        { credentialRef: 'c2', email: 'u2@test.com', status: 'quota_exceeded' },
+        { credentialRef: 'c3', email: 'u3@test.com', status: 'verification_required' },
+        { credentialRef: 'c4', email: 'u4@test.com', status: 'expired' },
+      ],
+      {},
+      'provider-1',
+      false,
+    )
+
+    const cards = ui.children
+      .find((c: any) => c.children?.some((child: any) => child.type === 'card'))
+      ?.children.filter((c: any) => c.type === 'card')
+    expect(cards).toHaveLength(4)
+
+    const status1 = cards[0].children[0].children[0].children[1].children[1]
+    const status2 = cards[1].children[0].children[0].children[1].children[1]
+    const status3 = cards[2].children[0].children[0].children[1].children[1]
+    const status4 = cards[3].children[0].children[0].children[1].children[1]
+
+    expect(status1.text.en).toBe('Connected ✓')
+    expect(status2.text.en).toBe('Quota Exceeded (429)')
+    expect(status3.text.en).toBe('Verification Required (403)')
+    expect(status4.text.en).toBe('Disconnected / Expired')
   })
 })
 
@@ -1005,6 +1113,94 @@ describe('provider-scoped account routing', () => {
     expect(events.some((event) => event.type === 'error')).toBe(false)
     expect(getAccessContext).toHaveBeenCalledWith(ref2)
     expect(getAccessContext).not.toHaveBeenCalledWith(ref1)
+  })
+
+  it('falls back across every account and reports one line per account when all fail', async () => {
+    const store = new MemoryProviderCredentialStore()
+    const auth = new AntigravityAuthAdapter(store)
+    const validUntil = Date.now() + 3_600_000
+    for (const email of ['a@example.com', 'b@example.com', 'c@example.com', 'd@example.com']) {
+      await store.create({
+        providerId: 'provider-1',
+        refreshToken: `t-${email}`,
+        accessToken: `access-${email}`,
+        accessExpiresAt: validUntil,
+        email,
+      })
+    }
+    const adapter = new AntigravityTransportAdapter(auth)
+
+    const quota = JSON.stringify({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'Resource has been exhausted (e.g. check quota).' } })
+    const verify = JSON.stringify({
+      error: {
+        code: 403,
+        status: 'PERMISSION_DENIED',
+        message: 'Verify your account to continue.',
+        details: [{ reason: 'VALIDATION_REQUIRED' }],
+      },
+    })
+    const failing = (status: number, body: string) => ({ ok: false, status, statusText: 'x', text: async () => body })
+    let call = 0
+    mockFetch.mockImplementation(async () => {
+      const account = Math.floor(call++ / 3)
+      return account % 2 === 0 ? failing(429, quota) : failing(403, verify)
+    })
+
+    const request = { messages: [{ role: 'user', content: 'hi' }], signal: new AbortController().signal } as any
+    const events: any[] = []
+    for await (const event of adapter.stream(request, { providerId: 'provider-1', model: 'gemini-3.6-flash' })) {
+      events.push(event)
+    }
+
+    expect(mockFetch).toHaveBeenCalledTimes(12)
+    const error = events.find((event) => event.type === 'error')?.error as string
+    expect(error).toContain('All Google Antigravity accounts failed')
+    expect(error).toContain('a@example.com: 429 RESOURCE_EXHAUSTED')
+    expect(error).toContain('b@example.com: 403 PERMISSION_DENIED VALIDATION_REQUIRED - Verify your account to continue')
+    expect(error.split('\n').filter((line) => line.startsWith('- '))).toHaveLength(4)
+  })
+
+  it('falls back to the daily endpoint when production answers 429 for the same account', async () => {
+    const store = new MemoryProviderCredentialStore()
+    const auth = new AntigravityAuthAdapter(store)
+    await store.create({
+      providerId: 'provider-1',
+      refreshToken: 't1',
+      accessToken: 'access-1',
+      accessExpiresAt: Date.now() + 3_600_000,
+      email: 'solo@example.com',
+    })
+    const adapter = new AntigravityTransportAdapter(auth)
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.startsWith('https://daily-cloudcode-pa')) {
+        return {
+          ok: true,
+          body: new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}\n\n',
+                ),
+              )
+              controller.close()
+            },
+          }),
+          headers: new Headers({ 'content-type': 'text/event-stream' }),
+        }
+      }
+      return { ok: false, status: 429, statusText: 'x', text: async () => '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}' }
+    })
+
+    const request = { messages: [{ role: 'user', content: 'hi' }], signal: new AbortController().signal } as any
+    const events: any[] = []
+    for await (const event of adapter.stream(request, { providerId: 'provider-1', model: 'gemini-3.6-flash' })) {
+      events.push(event)
+    }
+
+    expect(events.some((event) => event.type === 'error')).toBe(false)
+    expect(events.find((event) => event.type === 'done')?.response.content).toBe('ok')
+    expect(String(mockFetch.mock.calls[0]?.[0])).toContain('daily-cloudcode-pa')
   })
 
   it('refuses to stream when the provider owns no account', async () => {

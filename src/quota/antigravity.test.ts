@@ -1,4 +1,9 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest'
+
+vi.mock('../auth/google-oauth.js', () => ({
+  refreshAccessToken: vi.fn().mockRejectedValue(new Error('offline')),
+  fetchProjectId: vi.fn().mockResolvedValue('rising-fact-p41fc'),
+}))
 import { AntigravityQuotaProvider } from './antigravity.js'
 import { MemoryProviderCredentialStore } from '../credentials/credential-store.js'
 import * as fs from 'node:fs/promises'

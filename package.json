@@ -1,6 +1,6 @@
 {
   "name": "openfox-google-antigravity",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Google Antigravity (Cloud Code Assist) account provider plugin for OpenFox",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -47,5 +47,8 @@
     "url": "git+https://github.com/JamesDAdams/openfox-google-antigravity.git"
   },
   "author": "James Adams",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "undici": "^7.30.0"
+  }
 }

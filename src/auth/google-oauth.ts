@@ -1,3 +1,4 @@
+import { proxyFetch } from '../net.js'
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET, ANTIGRAVITY_SCOPES, ANTIGRAVITY_REDIRECT_PORT, ANTIGRAVITY_LOAD_ENDPOINTS, ANTIGRAVITY_DEFAULT_PROJECT_ID, getAntigravityHeaders } from '../constants.js'
@@ -33,14 +34,16 @@ export interface OAuthCallbackResult {
   state: string
 }
 
-export function startOAuthServer(port = ANTIGRAVITY_REDIRECT_PORT, timeoutMs = 180000): Promise<OAuthCallbackResult> {
+export function startOAuthServer(port = ANTIGRAVITY_REDIRECT_PORT, timeoutMs = 300000): Promise<OAuthCallbackResult> {
   return new Promise((resolve, reject) => {
     const server = createServer()
     let timeoutId: ReturnType<typeof setTimeout> | undefined
 
     const cleanup = () => {
       if (timeoutId) clearTimeout(timeoutId)
-      server.close()
+      try {
+        server.close()
+      } catch {}
     }
 
     server.on('request', (req, res) => {
@@ -60,7 +63,7 @@ export function startOAuthServer(port = ANTIGRAVITY_REDIRECT_PORT, timeoutMs = 1
       }
     })
 
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, '0.0.0.0', () => {
       timeoutId = setTimeout(() => {
         cleanup()
         reject(new Error('OAuth authorization timed out'))
@@ -82,7 +85,7 @@ export interface TokenResponse {
 
 export async function exchangeCode(code: string, verifier: string, port = ANTIGRAVITY_REDIRECT_PORT): Promise<TokenResponse> {
   const redirectUri = `http://localhost:${port}/oauth-callback`
-  const res = await fetch('https://oauth2.googleapis.com/token', {
+  const res = await proxyFetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -104,7 +107,7 @@ export interface RefreshTokenResponse {
 }
 
 export async function refreshAccessToken(refreshToken: string): Promise<RefreshTokenResponse> {
-  const res = await fetch('https://oauth2.googleapis.com/token', {
+  const res = await proxyFetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -119,7 +122,7 @@ export async function refreshAccessToken(refreshToken: string): Promise<RefreshT
 }
 
 export async function fetchUserEmail(accessToken: string): Promise<string | undefined> {
-  const res = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
+  const res = await proxyFetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
     headers: { Authorization: `Bearer ${accessToken}` },
   })
   if (!res.ok) return undefined
@@ -132,7 +135,7 @@ export async function fetchProjectId(accessToken: string): Promise<string> {
 
   for (const endpoint of ANTIGRAVITY_LOAD_ENDPOINTS) {
     try {
-      const res = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
+      const res = await proxyFetch(`${endpoint}/v1internal:loadCodeAssist`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,

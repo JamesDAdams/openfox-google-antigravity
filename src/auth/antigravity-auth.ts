@@ -1,3 +1,4 @@
+import { proxyFetch } from '../net.js'
 import type { ProviderAccessContext, ProviderAuthAdapter, ProviderAuthStatus, ProviderLoginChallenge } from 'openfox/provider'
 import type { ProviderCredentialStore } from '../credentials/credential-store.js'
 import { generatePKCE, buildAuthUrl, startOAuthServer, exchangeCode, refreshAccessToken, fetchUserEmail, fetchProjectId } from './google-oauth.js'
@@ -16,6 +17,8 @@ export interface AntigravityCredential {
   lastUsedAt?: number
   failureCount?: number
   cooldownUntil?: number
+  lastErrorStatus?: 'connected' | 'quota_exceeded' | 'verification_required' | 'expired' | 'error'
+  lastErrorMessage?: string
 }
 
 export interface AntigravityAccountInfo {
@@ -27,7 +30,8 @@ export interface AntigravityAccountInfo {
   cost?: number
   disabled?: boolean
   lastUsedAt?: number
-  status: 'connected' | 'expired' | 'error'
+  status: 'connected' | 'quota_exceeded' | 'verification_required' | 'expired' | 'error'
+  lastErrorMessage?: string
 }
 
 export class AntigravityAuthAdapter implements ProviderAuthAdapter {
@@ -38,7 +42,13 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
     completion: Promise<{ credentialRef: string }>
   }>()
 
+  private readonly loginErrors = new Map<string, string>()
+
   constructor(private readonly credentials: ProviderCredentialStore) {}
+
+  getLoginError(providerId?: string): string | undefined {
+    return providerId ? this.loginErrors.get(providerId) : undefined
+  }
 
   async beginLogin(context: { providerId: string }): Promise<{
     challenge: ProviderLoginChallenge
@@ -46,6 +56,7 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
   }> {
     const existing = this.activeLogins.get(context.providerId)
     if (existing) return existing
+    this.loginErrors.delete(context.providerId)
 
     const pkce = generatePKCE()
     const port = 51121
@@ -95,10 +106,14 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
           email,
           projectId,
           priority: existingAccounts.length,
+          lastErrorStatus: 'connected',
+          lastErrorMessage: undefined,
         }
 
         let credentialRef: string
         if (existingRef) {
+          const prevCred = (await this.credentials.get(existingRef)) as AntigravityCredential | undefined
+          credential.priority = prevCred?.priority ?? credential.priority
           await this.credentials.set(existingRef, credential)
           credentialRef = existingRef
           console.log('[openfox-google-antigravity] Existing credential updated:', credentialRef)
@@ -135,9 +150,11 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
           }
         } catch {}
 
+        this.loginErrors.delete(context.providerId)
         return { credentialRef }
       } catch (err) {
         console.error('[openfox-google-antigravity] OAuth completion failed:', err)
+        this.loginErrors.set(context.providerId, err instanceof Error ? err.message : String(err))
         throw err
       } finally {
         this.activeLogins.delete(context.providerId)
@@ -152,6 +169,14 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
   isLoginInProgress(providerId?: string): boolean {
     if (!providerId) return false
     return this.activeLogins.has(providerId)
+  }
+
+  cancelLogin(providerId?: string): void {
+    if (!providerId) return
+    this.activeLogins.delete(providerId)
+    try {
+      this.onAccountChange?.(providerId)
+    } catch {}
   }
 
   async getStatus(context: { providerId: string; credentialRef?: string }): Promise<ProviderAuthStatus> {
@@ -184,7 +209,7 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
    * provider, so without a provider id there is nothing to list — never fall
    * back to another provider's accounts.
    */
-  async listAccounts(providerId?: string): Promise<AntigravityAccountInfo[]> {
+  async listAccounts(providerId?: string, options?: { probeLive?: boolean }): Promise<AntigravityAccountInfo[]> {
     if (!providerId) return []
     if (typeof this.credentials.listReferences !== 'function') return []
     const refs = await this.credentials.listReferences()
@@ -194,6 +219,63 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
       const cred = (await this.credentials.get(ref)) as AntigravityCredential | undefined
       if (!cred) continue
       if (cred.providerId !== providerId) continue
+
+      let status: AntigravityAccountInfo['status'] = 'connected'
+      if (!cred.refreshToken) {
+        status = 'expired'
+      } else if (cred.lastErrorStatus) {
+        status = cred.lastErrorStatus
+      } else if (options?.probeLive) {
+        // Probe account actively when explicitly requested
+        try {
+          let token = cred.accessToken
+          const now = Date.now()
+          if (!token || !cred.accessExpiresAt || now >= cred.accessExpiresAt - 60000) {
+            const refreshed = await refreshAccessToken(cred.refreshToken)
+            token = refreshed.access_token
+            cred.accessToken = token
+            cred.accessExpiresAt = now + refreshed.expires_in * 1000
+            await this.credentials.set(ref, cred)
+          }
+
+          const res = await proxyFetch('https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ project: cred.projectId || 'rising-fact-p41fc' }),
+            signal: AbortSignal.timeout(5000),
+          })
+
+          if (res.status === 429) {
+            status = 'quota_exceeded'
+            cred.lastErrorStatus = 'quota_exceeded'
+            cred.lastErrorMessage = 'Resource has been exhausted (e.g. check quota)'
+            await this.credentials.set(ref, cred)
+          } else if (res.status === 403) {
+            const errJson = await res.json().catch(() => ({})) as any
+            const errMsg = errJson?.error?.message || ''
+            status = 'verification_required'
+            cred.lastErrorStatus = status
+            cred.lastErrorMessage = errMsg || 'Verification Required'
+            await this.credentials.set(ref, cred)
+          } else if (res.status === 401) {
+            status = 'expired'
+            cred.lastErrorStatus = 'expired'
+            cred.lastErrorMessage = 'Unauthenticated / Token expired'
+            await this.credentials.set(ref, cred)
+          } else if (res.ok) {
+            status = 'connected'
+            cred.lastErrorStatus = 'connected'
+            cred.lastErrorMessage = undefined
+            await this.credentials.set(ref, cred)
+          }
+        } catch {
+          // Keep current status if check timed out or network offline
+        }
+      }
+
       result.push({
         providerId: cred.providerId,
         credentialRef: ref,
@@ -203,7 +285,8 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
         cost: cred.cost,
         disabled: cred.disabled,
         lastUsedAt: cred.lastUsedAt,
-        status: cred.refreshToken ? 'connected' : 'expired',
+        status,
+        lastErrorMessage: cred.lastErrorMessage,
       })
     }
 
@@ -270,14 +353,16 @@ export class AntigravityAuthAdapter implements ProviderAuthAdapter {
   async getAccessContext(credentialRef: string): Promise<ProviderAccessContext> {
     const credential = (await this.credentials.get(credentialRef)) as AntigravityCredential | undefined
     if (!credential) throw new Error('Antigravity credential not found')
-    if (!credential.refreshToken) throw new Error('No refresh token available')
+    if (!credential.refreshToken && !credential.accessToken) throw new Error('No refresh token available')
 
     const bufferMs = 60000
     if (!credential.accessToken || !credential.accessExpiresAt || Date.now() >= credential.accessExpiresAt - bufferMs) {
-      const refreshed = await refreshAccessToken(credential.refreshToken)
-      credential.accessToken = refreshed.access_token
-      credential.accessExpiresAt = Date.now() + refreshed.expires_in * 1000
-      await this.credentials.set(credentialRef, credential)
+      if (credential.refreshToken) {
+        const refreshed = await refreshAccessToken(credential.refreshToken)
+        credential.accessToken = refreshed.access_token
+        credential.accessExpiresAt = Date.now() + refreshed.expires_in * 1000
+        await this.credentials.set(credentialRef, credential)
+      }
     }
 
     const arch = process.arch === 'x64' ? 'x64' : 'arm64'

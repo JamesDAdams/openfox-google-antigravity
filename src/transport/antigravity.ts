@@ -1,3 +1,4 @@
+import { proxyFetch } from '../net.js'
 import type {
   ProviderTransportAdapter,
   ProviderRequestContext,
@@ -52,37 +53,71 @@ function entrySupportsVision(entry: AntigravityModelEntry): boolean {
   return false
 }
 
+const MAX_SIGNATURES = 2000
+const thoughtSignatures = new Map<string, string>()
+
+function rememberSignature(callId: string, signature: string): void {
+  if (thoughtSignatures.size >= MAX_SIGNATURES) {
+    const oldest = thoughtSignatures.keys().next().value
+    if (oldest !== undefined) thoughtSignatures.delete(oldest)
+  }
+  thoughtSignatures.set(callId, signature)
+}
+
+export function getThoughtSignature(callId: string): string | undefined {
+  return thoughtSignatures.get(callId)
+}
+
 function convertMessages(msgs: LLMMessage[]): { contents: unknown[]; systemInstruction?: { parts: Array<{ text: string }> } } {
   const systemMsgs = msgs.filter((m) => m.role === 'system')
   const systemInstruction =
     systemMsgs.length > 0 ? { parts: systemMsgs.map((m) => ({ text: m.content ?? '' })) } : undefined
 
+  const toolNameById = new Map<string, string>()
+  for (const m of msgs) {
+    if (m.role === 'assistant' && m.toolCalls?.length) {
+      for (const tc of m.toolCalls) toolNameById.set(tc.id, tc.name)
+    }
+  }
+
   const contents: unknown[] = []
   for (const m of msgs) {
     if (m.role === 'system') continue
 
-    const role = m.role === 'assistant' ? 'model' : m.role
+    const isTool = m.role === 'tool'
+    const role = m.role === 'assistant' ? 'model' : isTool ? 'user' : m.role
     const parts: unknown[] = []
 
-    if (m.content) {
+    if (m.content && !isTool) {
       parts.push({ text: m.content })
     }
 
     if (m.role === 'assistant' && m.toolCalls?.length) {
       for (const tc of m.toolCalls) {
+        const signature = thoughtSignatures.get(tc.id)
         parts.push({
-          functionCall: { name: tc.name, args: tc.arguments },
+          functionCall: { id: tc.id, name: tc.name, args: tc.arguments },
+          ...(signature ? { thoughtSignature: signature } : {}),
         })
       }
     }
 
-    if (m.role === 'tool' && m.toolCallId) {
+    if (isTool && m.toolCallId) {
       parts.push({
         functionResponse: {
-          name: m.toolCallId,
+          id: m.toolCallId,
+          name: toolNameById.get(m.toolCallId) ?? m.toolCallId,
           response: { content: m.content ?? '' },
         },
       })
+    }
+
+    if (parts.length === 0) continue
+
+    const last = contents[contents.length - 1] as { role: string; parts: unknown[] } | undefined
+    if (isTool && last && last.role === 'user' && last.parts.every((p) => (p as any).functionResponse)) {
+      last.parts.push(...parts)
+      continue
     }
 
     contents.push({ role, parts })
@@ -122,6 +157,14 @@ function cleanJSONSchema(schema: any): any {
       continue
     }
 
+    if (key === 'type' && Array.isArray(val)) {
+      const types = val.filter((entry): entry is string => typeof entry === 'string')
+      const concrete = types.filter((entry) => entry !== 'null')
+      cleaned.type = concrete[0] ?? types[0] ?? 'string'
+      if (types.includes('null')) cleaned.nullable = true
+      continue
+    }
+
     cleaned[key] = cleanJSONSchema(val)
   }
 
@@ -150,6 +193,29 @@ function getThinkingBudget(effort: string): number {
       return 32768
     default:
       return 16384
+  }
+}
+
+export function pickEndpointError(errors: Array<{ status: number; message: string }>): string {
+  const meaningful = errors.find((entry) => !entry.message.includes('SUBSCRIPTION_REQUIRED'))
+  return (meaningful ?? errors[errors.length - 1])?.message ?? 'Antigravity request failed'
+}
+
+export function summarizeApiError(raw: string): string {
+  const jsonStart = raw.indexOf('{')
+  if (jsonStart === -1) return raw.slice(0, 200)
+  try {
+    const parsed = JSON.parse(raw.slice(jsonStart)) as {
+      error?: { code?: number; status?: string; message?: string; details?: Array<{ reason?: string }> }
+    }
+    const err = parsed.error
+    if (!err) return raw.slice(0, 200)
+    const reason = err.details?.find((detail) => detail.reason)?.reason
+    const head = [err.code, err.status, reason].filter(Boolean).join(' ')
+    const message = (err.message ?? '').split('. ')[0]
+    return `${head}${message ? ` - ${message}` : ''}`
+  } catch {
+    return raw.slice(0, 200)
   }
 }
 
@@ -333,7 +399,7 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
 
     for (const endpoint of ANTIGRAVITY_ENDPOINTS) {
       try {
-        const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+        const res = await proxyFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -374,9 +440,10 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
       return
     }
 
-    const maxAttempts = Math.min(accounts.length, 3)
+    const maxAttempts = accounts.length
     let attempts = 0
     let lastError: string | undefined
+    const accountErrors: string[] = []
     const triedAccountIds = new Set<string>()
 
     while (attempts < maxAttempts) {
@@ -392,12 +459,13 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
       try {
         this.routingEngine.recordUsage(selected)
         const access = await this.auth.getAccessContext(selected.credentialRef)
+        const projectId = selected.projectId || (await this.auth.getProjectId(selected.credentialRef))
         const model = context.model || 'gemini-3-flash'
 
         let hadData = false
         let accountError: string | null = null
 
-        for await (const event of this.streamGenerateContent(request, access, model, selected.projectId)) {
+        for await (const event of this.streamGenerateContent(request, access, model, projectId)) {
           if (event.type === 'error') {
             accountError = event.error
             break
@@ -411,6 +479,23 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
           this.routingEngine.recordFailure(selected)
           this.logger?.warn?.(`Antigravity request failed for account ${selected.email || selected.id}: ${accountError}`)
           lastError = accountError
+          accountErrors.push(`${selected.email || selected.id}: ${summarizeApiError(accountError)}`)
+
+          let errStatus: 'quota_exceeded' | 'verification_required' | 'expired' | 'error' = 'error'
+          if (accountError.includes('429') || accountError.includes('RESOURCE_EXHAUSTED')) {
+            errStatus = 'quota_exceeded'
+          } else if (accountError.includes('403') || accountError.includes('PERMISSION_DENIED') || accountError.includes('VALIDATION_REQUIRED')) {
+            errStatus = 'verification_required'
+          } else if (accountError.includes('401') || accountError.includes('UNAUTHENTICATED')) {
+            errStatus = 'expired'
+          }
+          if (typeof this.auth.updateAccount === 'function') {
+            void this.auth.updateAccount(selected.credentialRef, {
+              lastErrorStatus: errStatus,
+              lastErrorMessage: accountError,
+            } as any).catch(() => {})
+          }
+
           if (hadData) {
             // Once tokens started streaming, we cannot silently restart the stream without duplicate tokens
             yield { type: 'error', error: accountError }
@@ -421,17 +506,42 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
         }
 
         this.routingEngine.recordSuccess(selected)
+        if (typeof this.auth.updateAccount === 'function') {
+          void this.auth.updateAccount(selected.credentialRef, {
+            lastErrorStatus: 'connected',
+            lastErrorMessage: undefined,
+          } as any).catch(() => {})
+        }
         return
       } catch (error: any) {
         const errorMsg = error.message || String(error)
         this.routingEngine.recordFailure(selected)
         this.logger?.warn?.(`Antigravity stream error for account ${selected.email || selected.id}: ${errorMsg}`)
         lastError = errorMsg
+        accountErrors.push(`${selected.email || selected.id}: ${summarizeApiError(errorMsg)}`)
+        let errStatus: 'quota_exceeded' | 'verification_required' | 'expired' | 'error' = 'error'
+        if (errorMsg.includes('429') || errorMsg.includes('RESOURCE_EXHAUSTED')) {
+          errStatus = 'quota_exceeded'
+        } else if (errorMsg.includes('403') || errorMsg.includes('PERMISSION_DENIED') || errorMsg.includes('VALIDATION_REQUIRED')) {
+          errStatus = 'verification_required'
+        } else if (errorMsg.includes('401') || errorMsg.includes('UNAUTHENTICATED')) {
+          errStatus = 'expired'
+        }
+        if (typeof this.auth.updateAccount === 'function') {
+          void this.auth.updateAccount(selected.credentialRef, {
+            lastErrorStatus: errStatus,
+            lastErrorMessage: errorMsg,
+          } as any).catch(() => {})
+        }
         // Try next account if possible
       }
     }
 
-    yield { type: 'error', error: lastError || 'All Google Antigravity accounts are unavailable or failed.' }
+    const final =
+      accountErrors.length > 1
+        ? `All Google Antigravity accounts failed:\n${accountErrors.map((line) => `- ${line}`).join('\n')}`
+        : lastError || 'All Google Antigravity accounts are unavailable or failed.'
+    yield { type: 'error', error: final }
   }
 
   private async *streamGenerateContent(
@@ -454,10 +564,13 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
           thinkingLevel: request.reasoningEffort,
         }
       } else if (lowerModel.includes('claude')) {
+        const budget = getThinkingBudget(request.reasoningEffort)
         generationConfig.thinkingConfig = {
           include_thoughts: true,
-          thinking_budget: getThinkingBudget(request.reasoningEffort),
+          thinking_budget: budget,
         }
+        const current = typeof generationConfig.maxOutputTokens === 'number' ? generationConfig.maxOutputTokens : 0
+        if (current <= budget) generationConfig.maxOutputTokens = budget + 8192
       } else {
         generationConfig.thinkingConfig = {
           thinkingBudget: getThinkingBudget(request.reasoningEffort),
@@ -504,10 +617,11 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
     const antigravityHeaders = getAntigravityHeaders()
 
     let lastError: Error | undefined
+    const endpointErrors: Array<{ status: number; message: string }> = []
     for (const endpoint of ANTIGRAVITY_ENDPOINTS) {
       try {
         const url = `${endpoint}/v1internal:streamGenerateContent?alt=sse`
-        const res = await fetch(url, {
+        const res = await proxyFetch(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -520,11 +634,14 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
 
         if (!res.ok) {
           const errText = await res.text().catch(() => res.statusText)
-          if (res.status >= 500 || res.status === 429 || res.status === 400) {
-            lastError = new Error(`Antigravity API error (${res.status}): ${errText}`)
+          const message = `Antigravity API error (${res.status}): ${errText}`
+          const retryable = res.status >= 500 || res.status === 429 || res.status === 404 || res.status === 403
+          if (retryable && endpoint !== ANTIGRAVITY_ENDPOINTS[ANTIGRAVITY_ENDPOINTS.length - 1]) {
+            endpointErrors.push({ status: res.status, message })
             continue
           }
-          yield { type: 'error', error: `Antigravity API error (${res.status}): ${errText}` }
+          endpointErrors.push({ status: res.status, message })
+          yield { type: 'error', error: pickEndpointError(endpointErrors) }
           return
         }
 
@@ -551,7 +668,7 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
     let buffer = ''
     let fullContent = ''
     let fullThinking = ''
-    const toolCalls = new Map<string, { name: string; args: string }>()
+    const toolCalls = new Map<string, { name: string; args: string; signature?: string }>()
     let responseId = crypto.randomUUID()
     let finishReason: LLMCompletionResponse['finishReason'] = 'stop'
     let usage: LLMCompletionResponse['usage'] = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
@@ -562,12 +679,34 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
       return this.parseEventData(cleaned.slice(6))
     }
 
+    const toolCallIndices = new Map<string, number>()
+    const emitToolCall = (tc: { id?: string; name: string; args: string; signature?: string }): LLMStreamEvent => {
+      const key = tc.id || `${tc.name}_${toolCalls.size}`
+      const isNew = !toolCalls.has(key)
+      let index = toolCallIndices.get(key)
+      if (index === undefined) {
+        index = toolCallIndices.size
+        toolCallIndices.set(key, index)
+      }
+      toolCalls.set(key, { name: tc.name, args: tc.args, ...(tc.signature ? { signature: tc.signature } : {}) })
+      return {
+        type: 'tool_call_delta',
+        index,
+        ...(isNew ? { id: key, name: tc.name } : {}),
+        arguments: tc.args,
+      }
+    }
+
     try {
       while (true) {
         const { done, value } = await reader.read()
         if (done) {
           const parsed = parseLine(buffer)
           if (parsed) {
+            if (parsed.error) {
+              yield { type: 'error', error: parsed.error }
+              return
+            }
             if (parsed.thinking) {
               fullThinking += parsed.thinking
               yield { type: 'thinking_delta', content: parsed.thinking }
@@ -580,8 +719,7 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
             if (parsed.usage) usage = parsed.usage
             if (parsed.toolCalls) {
               for (const tc of parsed.toolCalls) {
-                const key = tc.id || tc.name
-                toolCalls.set(key, { name: tc.name, args: tc.args })
+                yield emitToolCall(tc)
               }
             }
           }
@@ -595,6 +733,10 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
         for (const line of lines) {
           const parsed = parseLine(line)
           if (!parsed) continue
+          if (parsed.error) {
+            yield { type: 'error', error: parsed.error }
+            return
+          }
           if (parsed.thinking) {
             fullThinking += parsed.thinking
             yield { type: 'thinking_delta', content: parsed.thinking }
@@ -607,8 +749,7 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
           if (parsed.usage) usage = parsed.usage
           if (parsed.toolCalls) {
             for (const tc of parsed.toolCalls) {
-              const key = tc.id || tc.name
-              toolCalls.set(key, { name: tc.name, args: tc.args })
+              yield emitToolCall(tc)
             }
           }
         }
@@ -619,12 +760,14 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
 
     const parsedToolCalls: ToolCall[] = []
     for (const [id, tc] of toolCalls) {
+      if (tc.signature) rememberSignature(id, tc.signature)
       try {
         parsedToolCalls.push({ id, name: tc.name, arguments: JSON.parse(tc.args) as Record<string, unknown> })
       } catch {
         parsedToolCalls.push({ id, name: tc.name, arguments: {}, parseError: 'Parse error', rawArguments: tc.args })
       }
     }
+    if (parsedToolCalls.length > 0 && finishReason === 'stop') finishReason = 'tool_calls'
 
     yield {
       type: 'done',
@@ -644,7 +787,8 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
     thinking?: string
     finishReason?: LLMCompletionResponse['finishReason']
     usage?: LLMCompletionResponse['usage']
-    toolCalls?: Array<{ id?: string; name: string; args: string }>
+    toolCalls?: Array<{ id?: string; name: string; args: string; signature?: string }>
+    error?: string
   } | null {
     let parsed: any
     try {
@@ -661,14 +805,20 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
           finish_reason?: string
         }>
       | undefined
-    if (!candidates?.length) return null
+    if (!candidates?.length) {
+      if (parsed.error) {
+        const msg = typeof parsed.error === 'object' ? parsed.error.message || JSON.stringify(parsed.error) : String(parsed.error)
+        return { error: msg }
+      }
+      return null
+    }
 
     const candidate = candidates[0]
     const parts = candidate?.content?.parts
 
     let text = ''
     let thinking = ''
-    const toolCalls: Array<{ id?: string; name: string; args: string }> = []
+    const toolCalls: Array<{ id?: string; name: string; args: string; signature?: string }> = []
     if (parts?.length) {
       for (const part of parts) {
         if (part.thought) thinking += part.thought
@@ -676,10 +826,12 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
         if (part.text) text += part.text
         const fc = (part as any).functionCall as { id?: string; name?: string; args?: unknown } | undefined
         if (fc?.name) {
+          const signature = (part as any).thoughtSignature ?? (part as any).thought_signature
           toolCalls.push({
             id: fc.id,
             name: fc.name,
             args: typeof fc.args === 'string' ? fc.args : JSON.stringify(fc.args ?? {}),
+            ...(typeof signature === 'string' ? { signature } : {}),
           })
         }
       }
@@ -693,7 +845,7 @@ export class AntigravityTransportAdapter implements ProviderTransportAdapter {
       thinking?: string
       finishReason?: LLMCompletionResponse['finishReason']
       usage?: LLMCompletionResponse['usage']
-      toolCalls?: Array<{ id?: string; name: string; args: string }>
+      toolCalls?: Array<{ id?: string; name: string; args: string; signature?: string }>
     } = {}
     if (text) data.text = text
     if (thinking) data.thinking = thinking
