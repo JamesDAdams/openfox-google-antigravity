@@ -304,42 +304,6 @@ export async function register(registry: ProviderPluginRegistry): Promise<void> 
     })
   }
 
-  // Register tool for LLM to query all Google Antigravity quotas
-  if (typeof registry.registerTool === 'function') {
-    registry.registerTool({
-      name: 'get_antigravity_quota',
-      description: 'Retrieve current model quota limits and usage across all configured Google Antigravity provider accounts.',
-      parameters: {
-        type: 'object',
-        properties: {
-          providerId: {
-            type: 'string',
-            description: 'Optional Google Antigravity provider ID or source ID filter',
-          },
-        },
-      },
-      execute: async (args) => {
-        const providerId = typeof args['providerId'] === 'string' ? args['providerId'] : undefined
-        if (providerId) {
-          const accounts = await quotaProvider.discoverProviders()
-          const target = accounts.find((a) => a.id === providerId || a.sourceId === providerId)
-          if (target) {
-            const source = await quotaProvider.getQuotaForAccount(target)
-            return {
-              success: true,
-              output: JSON.stringify(source, null, 2),
-            }
-          }
-        }
-        const sources = await quotaProvider.getAllQuotaSources()
-        return {
-          success: true,
-          output: JSON.stringify({ sources }, null, 2),
-        }
-      },
-    })
-  }
-
   // Register turn completion hook to keep quotas updated
   if (typeof registry.registerHook === 'function') {
     registry.registerHook('turn.completed', async () => {

@@ -99,12 +99,6 @@ declare module 'openfox/provider' {
       method: string,
       handler: (params: Record<string, unknown>, context: Record<string, unknown>) => unknown | Promise<unknown>,
     ): void
-    registerTool?(tool: {
-      name: string
-      description: string
-      parameters: Record<string, unknown>
-      execute(args: Record<string, unknown>, context: Record<string, unknown>): Promise<{ success: boolean; output?: string; error?: string }>
-    }): void
   }
 }
 
